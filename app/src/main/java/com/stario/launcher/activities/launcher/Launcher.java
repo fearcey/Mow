@@ -23,35 +23,37 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
-import android.widget.LinearLayout;
 
-import androidx.annotation.NonNull;
+import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.res.ResourcesCompat;
 import androidx.core.math.MathUtils;
 
 import com.stario.launcher.R;
-import com.stario.launcher.activities.launcher.glance.Glance;
-import com.stario.launcher.activities.launcher.glance.extensions.GlanceDialogExtension;
-import com.stario.launcher.activities.launcher.glance.extensions.calendar.Calendar;
-import com.stario.launcher.activities.launcher.glance.extensions.media.Media;
-import com.stario.launcher.activities.launcher.glance.extensions.weather.Weather;
-import com.stario.launcher.activities.launcher.pins.PinnedCategory;
 import com.stario.launcher.activities.launcher.sheets.LauncherSheets;
+import com.stario.launcher.activities.launcher.widgets.ClockWidget;
+import com.stario.launcher.activities.launcher.widgets.SearchWidget;
+import com.stario.launcher.activities.launcher.widgets.glance.Glance;
+import com.stario.launcher.activities.launcher.widgets.glance.GlanceDialogExtension;
+import com.stario.launcher.activities.launcher.widgets.glance.extensions.calendar.Calendar;
+import com.stario.launcher.activities.launcher.widgets.glance.extensions.media.Media;
+import com.stario.launcher.activities.launcher.widgets.glance.extensions.weather.Weather;
+import com.stario.launcher.activities.launcher.widgets.pins.PinnedCategory;
 import com.stario.launcher.activities.settings.Settings;
 import com.stario.launcher.preferences.Vibrations;
 import com.stario.launcher.sheet.SheetsFocusController;
 import com.stario.launcher.themes.ThemedActivity;
 import com.stario.launcher.ui.Measurements;
+import com.stario.launcher.ui.back.BackEvent;
+import com.stario.launcher.ui.back.BackGestureEventBus;
+import com.stario.launcher.ui.common.grid.DynamicGridLayout;
 import com.stario.launcher.ui.common.lock.ClosingAnimationView;
 import com.stario.launcher.ui.popup.PopupMenu;
 import com.stario.launcher.ui.utils.HomeWatcher;
@@ -61,19 +63,21 @@ import com.stario.launcher.ui.utils.animation.WallpaperAnimator;
 import com.stario.launcher.utils.Utils;
 
 public class Launcher extends ThemedActivity {
-    public static final int MAX_BACKGROUND_ALPHA = 230;
     public static final String INTENT_KILL_TASK_ID_EXTRA = "com.stario.launcher.INTENT_KILL_TASK_ID_EXTRA";
     public static final String ACTION_KILL_TASK = "com.stario.launcher.ACTION_KILL_TASK";
 
+    private BackGestureEventBus.BackEventListener backEventListener;
     private BroadcastReceiver screenOnReceiver;
     private SheetsFocusController controller;
     private BroadcastReceiver killReceiver;
-    private ClosingAnimationView main;
-    private HomeWatcher homeWatcher;
     private PinnedCategory pinnedCategory;
+    private DynamicGridLayout container;
+    private ClosingAnimationView main;
+    private SearchWidget searchWidget;
+    private ClockWidget clockWidget;
+    private HomeWatcher homeWatcher;
     private boolean showWhenLocked;
     private View statusBarContrast;
-    private LinearLayout container;
     private View navBarContrast;
     private View decorView;
     private Glance glance;
@@ -104,7 +108,10 @@ public class Launcher extends ThemedActivity {
         };
 
         homeWatcher = new HomeWatcher(this);
-        homeWatcher.setOnHomePressedListener(() -> setContrastVisibility(View.GONE));
+        homeWatcher.setOnHomePressedListener(() -> {
+            setContrastVisibility(View.GONE);
+            setRearrangeable(false);
+        });
 
         if (Utils.isMinimumSDK(Build.VERSION_CODES.TIRAMISU)) {
             registerReceiver(killReceiver, new IntentFilter(ACTION_KILL_TASK), RECEIVER_EXPORTED);
@@ -126,11 +133,28 @@ public class Launcher extends ThemedActivity {
         decorView = window.getDecorView();
 
         Measurements.measure(getRoot(), (insets) -> {
-            controller.setPadding(0, Measurements.getSysUIHeight(), 0,
-                    Measurements.getNavHeight() + Measurements.dpToPx(20));
+            if (Measurements.isLandscape()) {
+                container.setPadding(0, Measurements.getSysUIHeight(),
+                        0, Measurements.getNavHeight());
+            } else {
+                container.setPadding(Measurements.getDefaultPadding(),
+                        Measurements.getSysUIHeight() + Measurements.getDefaultPadding(),
+                        Measurements.getDefaultPadding(),
+                        Measurements.getNavHeight() + Measurements.getDefaultPadding());
+            }
 
             return insets;
         });
+
+        if (Utils.isMinimumSDK(Build.VERSION_CODES.TIRAMISU)) {
+            getOnBackPressedDispatcher()
+                    .addCallback(this, new OnBackPressedCallback(true) {
+                        @Override
+                        public void handleOnBackPressed() {
+                            setRearrangeable(false);
+                        }
+                    });
+        }
 
         statusBarContrast = findViewById(R.id.status_bar_contrast);
         navBarContrast = findViewById(R.id.navigation_bar_contrast);
@@ -171,15 +195,14 @@ public class Launcher extends ThemedActivity {
             registerReceiver(screenOnReceiver, new IntentFilter(Intent.ACTION_SCREEN_ON));
         }
 
-        container.setOrientation(Measurements.isLandscape() ?
-                LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
-
         LauncherSheets.attach(this, this::animateSheet);
         attachPinnedCategory(container);
         attachGlance(container);
+        attachSearch(container);
+        attachClock(container);
     }
 
-    private void attachPinnedCategory(LinearLayout container) {
+    private void attachPinnedCategory(DynamicGridLayout container) {
         pinnedCategory = new PinnedCategory(this);
         pinnedCategory.attach(container,
                 () -> controller.hideAllSheets(),
@@ -188,7 +211,17 @@ public class Launcher extends ThemedActivity {
         );
     }
 
-    private void attachGlance(LinearLayout container) {
+    private void attachClock(DynamicGridLayout container) {
+        clockWidget = new ClockWidget(this);
+        clockWidget.attach(container);
+    }
+
+    private void attachSearch(DynamicGridLayout container) {
+        searchWidget = new SearchWidget(this);
+        searchWidget.attach(container);
+    }
+
+    private void attachGlance(DynamicGridLayout container) {
         glance = new Glance(this);
         glance.attach(container);
 
@@ -197,8 +230,8 @@ public class Launcher extends ThemedActivity {
 
         Calendar calendar = new Calendar();
         glance.attachViewExtension(calendar);
-        glance.attachDialogExtension(new Media(), Gravity.BOTTOM, listener);
-        glance.attachDialogExtension(new Weather(), Gravity.BOTTOM, listener);
+        glance.attachDialogExtension(new Media(), listener);
+        glance.attachDialogExtension(new Weather(), listener);
     }
 
     public void displayLauncherOptions(Launcher activity, SheetsFocusController controller) {
@@ -214,6 +247,49 @@ public class Launcher extends ThemedActivity {
 
                     activity.startActivity(intent,
                             ActivityOptions.makeSceneTransitionAnimation(activity).toBundle());
+
+                    backEventListener = new BackGestureEventBus.BackEventListener(Settings.class) {
+                        @Override
+                        public void onBackEvent(BackEvent event) {
+                            View root = getRoot();
+                            if (root == null) {
+                                return;
+                            }
+
+                            switch (event.type) {
+                                case BACK_PROGRESS:
+                                    root.animate().cancel();
+                                    root.setVisibility(View.VISIBLE);
+
+                                    root.setAlpha(event.progress);
+                                    root.setScaleX(0.9f + 0.1f * event.progress);
+                                    root.setScaleY(0.9f + 0.1f * event.progress);
+
+                                    break;
+                                case BACK_CANCELLED:
+                                    root.setVisibility(View.INVISIBLE);
+                                    root.animate()
+                                            .alpha(0f)
+                                            .scaleY(0.9f)
+                                            .scaleX(0.9f)
+                                            .setDuration(Animation.SHORT.getDuration())
+                                            .withEndAction(() ->
+                                                    root.setVisibility(View.INVISIBLE));
+
+                                    break;
+                            }
+                        }
+                    };
+
+                    BackGestureEventBus.getInstance()
+                            .addListener(backEventListener);
+                })));
+
+        menu.add(new PopupMenu.Item(resources.getString(R.string.rearrange),
+                ResourcesCompat.getDrawable(resources, R.drawable.ic_move, activity.getTheme()),
+                view -> view.post(() -> {
+                    setRearrangeable(true);
+                    menu.dismiss();
                 })));
 
         menu.add(new PopupMenu.Item(resources.getString(R.string.wallpaper),
@@ -299,6 +375,8 @@ public class Launcher extends ThemedActivity {
         }
 
         pinnedCategory.detach();
+        searchWidget.detach();
+        clockWidget.detach();
 
         super.onDestroy();
     }
@@ -308,22 +386,25 @@ public class Launcher extends ThemedActivity {
         glance.update();
         updateWallpaperZoom(0f);
 
+        View root = getRoot();
+        root.setVisibility(View.VISIBLE);
+        root.animate()
+                .alpha(1f)
+                .scaleY(1f)
+                .scaleX(1f)
+                .setDuration(Animation.SHORT.getDuration());
+
+        BackGestureEventBus.getInstance().removeListener(backEventListener);
+        backEventListener = null;
+
         controller.animate()
                 .alpha(1)
                 .scaleX(1)
                 .scaleY(1)
-                .setDuration(Animation.EXTENDED.getDuration())
-                .setInterpolator(new DecelerateInterpolator(3));
+                .setDuration(Animation.LONG.getDuration())
+                .setInterpolator(new DecelerateInterpolator(2));
 
         super.onResume();
-    }
-
-    @Override
-    public void onConfigurationChanged(@NonNull Configuration configuration) {
-        super.onConfigurationChanged(configuration);
-
-        container.setOrientation(Measurements.isLandscape() ?
-                LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
     }
 
     @Override
@@ -345,6 +426,13 @@ public class Launcher extends ThemedActivity {
         }
     }
 
+    private void setRearrangeable(boolean value) {
+        if (controller != null && container != null) {
+            container.setRearrangeable(value);
+            controller.setControllerEnabled(!value);
+        }
+    }
+
     @Override
     protected void onStart() {
         super.onStart();
@@ -355,6 +443,8 @@ public class Launcher extends ThemedActivity {
     @Override
     protected void onStop() {
         setContrastVisibility(View.GONE);
+
+        setRearrangeable(false);
         homeWatcher.stopWatch();
 
         if (showWhenLocked) {
@@ -414,9 +504,10 @@ public class Launcher extends ThemedActivity {
         return false;
     }
 
+    @Override
     @SuppressWarnings("deprecation")
     @SuppressLint({"MissingSuperCall", "GestureBackNavigation"})
-    @Override
     public void onBackPressed() {
+        setRearrangeable(false);
     }
 }

@@ -17,8 +17,8 @@ android {
         applicationId 'com.stario.launcher'
         minSdkVersion 29
         targetSdkVersion 36
-        versionCode 92
-        versionName '2.11'
+        versionCode 96
+        versionName '2.15'
     }
 
     signingConfigs {
@@ -72,6 +72,7 @@ android {
                            'src/main/res/notes',
                            'src/main/res/editor',
                            'src/main/res/interactions',
+                           'src/main/res/home',
                            'src/main/res/widgets',
                            'src/main/res/media',
                            'src/main/res/weather',

@@ -162,26 +162,8 @@ public abstract class SheetBehavior<V extends View> extends CoordinatorLayout.Be
 
     @Override
     public void onRestoreInstanceState(@NonNull CoordinatorLayout parent, @NonNull V child, @NonNull Parcelable state) {
-        SavedSheetState savedSheetState = (SavedSheetState) state;
-
-        if (savedSheetState.getSuperState() != null) {
-            super.onRestoreInstanceState(parent, child, savedSheetState.getSuperState());
-
-            // Intermediate states are restored as collapsed state
-            if (savedSheetState.state == STATE_DRAGGING || savedSheetState.state == STATE_SETTLING) {
-                this.state = STATE_COLLAPSED;
-            } else {
-                this.state = savedSheetState.state;
-            }
-        } else {
-            super.onRestoreInstanceState(parent, child, state);
-        }
-    }
-
-    @NonNull
-    @Override
-    public Parcelable onSaveInstanceState(@NonNull CoordinatorLayout parent, @NonNull V child) {
-        return new SavedSheetState(super.onSaveInstanceState(parent, child), state);
+        super.onRestoreInstanceState(parent, child, state);
+        this.state = STATE_COLLAPSED;
     }
 
     @Override
@@ -221,10 +203,10 @@ public abstract class SheetBehavior<V extends View> extends CoordinatorLayout.Be
         }
 
         // look for view pager switching
-        ViewPager pager = findPager(child);
+        if (pagerRef == null || pagerRef.get() == null) {
+            ViewPager pager = findPager(child);
 
-        if (pager != null) {
-            if (pagerRef == null || !child.equals(pager)) {
+            if (pager != null) {
                 pager.addOnPageChangeListener(new ViewPager.SimpleOnPageChangeListener() {
                     @Override
                     public void onPageScrollStateChanged(int state) {
@@ -242,11 +224,16 @@ public abstract class SheetBehavior<V extends View> extends CoordinatorLayout.Be
             }
         }
 
-        View target = findNestedScrollingChild(child);
+        View target = (nestedScrollingChildRef == null ||
+                nestedScrollingChildRef.get() == null ||
+                !nestedScrollingChildRef.get().isShown())
+                ? findNestedScrollingChild(child)
+                : null;
 
         if (target != null) {
             nestedScrollingChildRef = new WeakReference<>(target);
         }
+
 
         if (dragHelper == null) {
             dragHelper = SheetDragHelper.create(parent, instantiateDragCallback());
@@ -543,6 +530,10 @@ public abstract class SheetBehavior<V extends View> extends CoordinatorLayout.Be
 
     @Nullable
     private View findNestedScrollingChild(View view) {
+        if (view == null) {
+            return null;
+        }
+
         if (ViewCompat.isNestedScrollingEnabled(view) &&
                 !(view instanceof SwipeRefreshLayout) &&
                 view.isAttachedToWindow() &&

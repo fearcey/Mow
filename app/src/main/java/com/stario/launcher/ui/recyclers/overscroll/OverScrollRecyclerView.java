@@ -17,6 +17,7 @@
 
 package com.stario.launcher.ui.recyclers.overscroll;
 
+import android.annotation.SuppressLint;
 import android.graphics.Canvas;
 import android.view.MotionEvent;
 import android.widget.EdgeEffect;
@@ -31,6 +32,9 @@ public class OverScrollRecyclerView extends RecyclerView implements OverScroll {
     private ArrayList<OverScrollEffect<OverScrollRecyclerView>> edgeEffects;
     private ArrayList<OnScrollListener> onScrollListeners;
     private ArrayList<OverScrollContract> contracts;
+    private OverScrollEffect<?> overScrollOwner;
+    private boolean isLayoutPending;
+    private boolean touching;
     @OverScrollEffect.Edge
     private int pullEdges;
 
@@ -57,6 +61,9 @@ public class OverScrollRecyclerView extends RecyclerView implements OverScroll {
         this.overScrollListeners = new ArrayList<>();
         this.onScrollListeners = new ArrayList<>();
         this.edgeEffects = new ArrayList<>();
+        this.overScrollOwner = null;
+        this.touching = false;
+        this.isLayoutPending = false;
         this.pullEdges = OverScrollEffect.PULL_EDGE_BOTTOM | OverScrollEffect.PULL_EDGE_TOP;
 
         super.setEdgeEffectFactory(new EdgeEffectFactory() {
@@ -64,8 +71,17 @@ public class OverScrollRecyclerView extends RecyclerView implements OverScroll {
             @Override
             protected EdgeEffect createEdgeEffect(@NonNull RecyclerView view, int direction) {
                 if (view instanceof OverScroll) {
-                    OverScrollEffect<OverScrollRecyclerView> effect =
-                            new OverScrollEffect<>(OverScrollRecyclerView.this, pullEdges);
+                    OverScrollEffect<OverScrollRecyclerView> effect;
+
+                    if (direction == RecyclerView.EdgeEffectFactory.DIRECTION_TOP) {
+                        effect = new OverScrollEffect<>(OverScrollRecyclerView.this,
+                                pullEdges, OverScrollEffect.PIVOT_TOP);
+                    } else if (direction == RecyclerView.EdgeEffectFactory.DIRECTION_BOTTOM) {
+                        effect = new OverScrollEffect<>(OverScrollRecyclerView.this,
+                                pullEdges, OverScrollEffect.PIVOT_BOTTOM);
+                    } else {
+                        effect = new OverScrollEffect<>(OverScrollRecyclerView.this, pullEdges);
+                    }
 
                     for (OverScrollEffect.OnOverScrollListener listener : overScrollListeners) {
                         effect.addOnOverScrollListener(listener);
@@ -79,6 +95,74 @@ public class OverScrollRecyclerView extends RecyclerView implements OverScroll {
                 return new EdgeEffect(view.getContext());
             }
         });
+
+        this.addOnLayoutChangeListener((v, left, top, right, bottom,
+                                        oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (isLayoutPending) {
+                boolean sizeChanged = (bottom - top) != (oldBottom - oldTop)
+                        || (right - left) != (oldRight - oldLeft);
+
+                if (sizeChanged) {
+                    isLayoutPending = false;
+
+                    if (touching) {
+                        super.stopNestedScroll();
+
+                    }
+                }
+            }
+        });
+    }
+
+    @Override
+    @SuppressLint("ClickableViewAccessibility")
+    public boolean onTouchEvent(MotionEvent event) {
+        int action = event.getAction();
+        touching = (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL);
+
+        return super.onTouchEvent(event);
+    }
+
+    /*
+     * If the async adapter updates and triggers a layout pass,
+     * RecyclerView usually calls stopNestedScroll(). This kills the drag gesture,
+     * making the BottomSheet seem "not responsive".
+     *
+     * A workaround for THIS specific scenario:
+     * - Block stopNestedScroll() if a layout is pending.
+     * - Use an OnLayoutChangeListener to detect when the dimensions actually change.
+     * - Release the scroll lock only after the layout is stable and the user lets go.
+     *
+     * This is HIGHLY EXPERIMENTAL AND MAY BREAK, revert this if issues occur.
+     * Consecutive stopNestedScroll() without calling startNestedScroll() beforehand
+     * **SHOULD** be fine (famous last words)
+     */
+    @Override
+    public void stopNestedScroll() {
+        if (isLayoutRequested()) {
+            isLayoutPending = true;
+            return;
+        }
+
+        super.stopNestedScroll();
+    }
+
+    @Override
+    public boolean tryCaptureOverScroll(@NonNull OverScrollEffect<?> effect) {
+        if (overScrollOwner == null || overScrollOwner.equals(effect)) {
+            overScrollOwner = effect;
+
+            return true;
+        }
+
+        return false;
+    }
+
+    @Override
+    public void releaseOverScroll(@NonNull OverScrollEffect<?> effect) {
+        if (overScrollOwner != null && overScrollOwner.equals(effect)) {
+            overScrollOwner = null;
+        }
     }
 
     public void addOnOverScrollListener(OverScrollEffect.OnOverScrollListener listener) {

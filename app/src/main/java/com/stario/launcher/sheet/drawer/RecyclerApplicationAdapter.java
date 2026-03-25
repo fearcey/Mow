@@ -28,12 +28,10 @@ import android.content.res.Resources;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.net.Uri;
-import android.os.Handler;
-import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
-import android.view.MotionEvent;
+import android.view.Choreographer;
 import android.view.View;
-import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.PopupWindow;
@@ -50,6 +48,7 @@ import com.stario.launcher.apps.ProfileApplicationManager;
 import com.stario.launcher.apps.ProfileManager;
 import com.stario.launcher.apps.popup.ApplicationCustomizationDialog;
 import com.stario.launcher.preferences.Vibrations;
+import com.stario.launcher.sheet.SheetsFocusController;
 import com.stario.launcher.themes.ThemedActivity;
 import com.stario.launcher.ui.Measurements;
 import com.stario.launcher.ui.icons.AdaptiveIconView;
@@ -141,124 +140,75 @@ public abstract class RecyclerApplicationAdapter
                 label.setLines(getLabelLineCount());
             }
 
-            View.OnClickListener clickListener = getOnClickListener();
-            View.OnLongClickListener longClickListener = getOnLongClickListener();
+            itemView.setOnTouchListener(
+                    SheetsFocusController.createClickTouchListener(
+                            getOnClickListener(),
+                            getOnLongClickListener(),
+                            new SheetsFocusController.OnLongClickEventListener() {
+                                private Choreographer.FrameCallback iconAnimationCallback;
 
-            itemView.setOnTouchListener(new View.OnTouchListener() {
-                private final float MOVE_SLOP = ViewConfiguration.get(activity).getScaledTouchSlop();
-                private final int LONG_PRESS_TIMEOUT = ViewConfiguration.getLongPressTimeout();
+                                @Override
+                                public void onDown(long duration) {
+                                    icon.animate().cancel();
 
-                private final Handler handler = new Handler(Looper.getMainLooper());
+                                    float startScale = icon.getScaleX();
+                                    float endScale = AdaptiveIconView.MAX_SCALE;
 
-                private boolean hasPerformedLongClick;
-                private Runnable longPressRunnable;
-                private boolean hasFiredDragEvent;
-                private boolean assumesClick;
-                private float rawStartX;
-                private float rawStartY;
-                private float startX;
-                private float startY;
+                                    if (iconAnimationCallback != null) {
+                                        Choreographer.getInstance()
+                                                .removeFrameCallback(iconAnimationCallback);
+                                        iconAnimationCallback = null;
+                                    }
 
-                @SuppressLint("ClickableViewAccessibility")
-                @Override
-                public boolean onTouch(View view, MotionEvent event) {
-                    switch (event.getAction()) {
-                        case MotionEvent.ACTION_DOWN: {
-                            assumesClick = true;
-                            hasFiredDragEvent = false;
-                            hasPerformedLongClick = false;
+                                    if (duration <= 0) {
+                                        icon.setScaleX(endScale);
+                                        icon.setScaleY(endScale);
 
-                            startX = event.getX();
-                            startY = event.getY();
-                            rawStartX = event.getRawX();
-                            rawStartY = event.getRawY();
+                                        return;
+                                    }
 
-                            dialog = null;
+                                    long startTime = SystemClock.uptimeMillis();
+                                    iconAnimationCallback = new Choreographer.FrameCallback() {
+                                        @Override
+                                        public void doFrame(long frameTimeNanos) {
+                                            long elapsed = SystemClock.uptimeMillis() - startTime;
+                                            float fraction = Math.min(1f, (float) elapsed / duration);
+                                            float scale = startScale + fraction * (endScale - startScale);
 
-                            if (longClickListener != null) {
-                                icon.animate().scaleY(AdaptiveIconView.MAX_SCALE)
-                                        .scaleX(AdaptiveIconView.MAX_SCALE)
-                                        .setInterpolator(new DecelerateInterpolator())
-                                        .setDuration(LONG_PRESS_TIMEOUT);
-                            }
+                                            icon.setScaleX(scale);
+                                            icon.setScaleY(scale);
 
-                            longPressRunnable = () -> {
-                                hasPerformedLongClick = true;
+                                            if (fraction < 1f) {
+                                                Choreographer.getInstance().postFrameCallback(this);
+                                            } else {
+                                                iconAnimationCallback = null;
+                                            }
+                                        }
+                                    };
 
-                                if (longClickListener != null) {
-                                    Vibrations.getInstance().vibrate();
-                                    longClickListener.onLongClick(itemView);
-                                }
-                            };
-
-                            handler.postDelayed(longPressRunnable, LONG_PRESS_TIMEOUT);
-
-                            break;
-                        }
-
-                        case MotionEvent.ACTION_MOVE: {
-                            if (!isAClick(startX, event.getX(), startY, event.getY())) {
-                                assumesClick = false;
-                            }
-
-                            if (Math.abs(rawStartX - event.getRawX()) > MOVE_SLOP ||
-                                    Math.abs(rawStartY - event.getRawY()) > MOVE_SLOP) {
-                                handler.removeCallbacks(longPressRunnable);
-                            }
-
-                            if (itemTouchHelper != null && dialog != null &&
-                                    hasPerformedLongClick && !hasFiredDragEvent) {
-
-                                ((ViewGroup) itemView).requestDisallowInterceptTouchEvent(true);
-
-                                if (Math.abs(rawStartX - event.getRawX()) > MOVE_SLOP ||
-                                        Math.abs(rawStartY - event.getRawY()) > MOVE_SLOP) {
-                                    ((ViewGroup) itemView).requestDisallowInterceptTouchEvent(false);
-                                    itemTouchHelper.startDrag(ApplicationViewHolder.this);
-                                    dialog.dismiss();
-
-                                    hasFiredDragEvent = true;
-                                }
-                            }
-
-                            break;
-                        }
-
-                        case MotionEvent.ACTION_UP:
-                        case MotionEvent.ACTION_CANCEL: {
-                            handler.removeCallbacks(longPressRunnable);
-                            if (longClickListener != null) {
-                                icon.animate().scaleY(1)
-                                        .scaleX(1)
-                                        .setDuration(Animation.SHORT.getDuration());
-                            }
-
-                            if (event.getAction() == MotionEvent.ACTION_UP) {
-                                if (assumesClick &&
-                                        !hasPerformedLongClick &&
-                                        clickListener != null &&
-                                        isAClick(startX, event.getX(), startY, event.getY())) {
-                                    Vibrations.getInstance().vibrate();
-                                    clickListener.onClick(itemView);
+                                    Choreographer.getInstance()
+                                            .postFrameCallback(iconAnimationCallback);
                                 }
 
-                                assumesClick = false;
-                            }
+                                @Override
+                                public void onFinished() {
+                                    if (iconAnimationCallback != null) {
+                                        Choreographer.getInstance()
+                                                .removeFrameCallback(iconAnimationCallback);
 
-                            hasPerformedLongClick = false;
+                                        iconAnimationCallback = null;
+                                    }
 
-                            break;
-                        }
-                    }
-
-                    return true;
-                }
-
-                private boolean isAClick(float startX, float endX, float startY, float endY) {
-                    return Math.abs(startX - endX) < MOVE_SLOP &&
-                            Math.abs(startY - endY) < MOVE_SLOP;
-                }
-            });
+                                    icon.animate().scaleY(1)
+                                            .scaleX(1)
+                                            .setInterpolator(new DecelerateInterpolator())
+                                            .setDuration(Animation.SHORT.getDuration());
+                                }
+                            },
+                            this,
+                            itemTouchHelper,
+                            () -> dialog.dismiss())
+            );
         }
 
         private void showPopup(LauncherApplication application) {
@@ -357,6 +307,8 @@ public abstract class RecyclerApplicationAdapter
 
         public View.OnLongClickListener getOnLongClickListener() {
             return view -> {
+                Vibrations.getInstance().vibrate();
+
                 int index = getBindingAdapterPosition();
                 if (index == RecyclerView.NO_POSITION) {
                     return false;
@@ -365,10 +317,6 @@ public abstract class RecyclerApplicationAdapter
                 LauncherApplication application = getApplication(index);
 
                 if (application != LauncherApplication.FALLBACK_APP) {
-                    icon.animate().scaleY(1)
-                            .scaleX(1)
-                            .setDuration(Animation.SHORT.getDuration());
-
                     showPopup(application);
 
                     return true;
@@ -380,6 +328,8 @@ public abstract class RecyclerApplicationAdapter
 
         public View.OnClickListener getOnClickListener() {
             return view -> {
+                Vibrations.getInstance().vibrate();
+
                 int index = getBindingAdapterPosition();
                 if (index == RecyclerView.NO_POSITION) {
                     return;
@@ -447,7 +397,8 @@ public abstract class RecyclerApplicationAdapter
             }
 
             viewHolder.icon.setApplication(application);
-            viewHolder.icon.setTransitionName(application.getInfo().packageName);
+            viewHolder.icon.setTransitionName(application.getInfo().packageName
+                    + application.getProfile());
         }
 
         viewHolder.icon.setTag(R.id.stagger_order_tag, index);

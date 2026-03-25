@@ -17,4 +17,5 @@
 
 <resources>
     <item name="stagger_order_tag" type="id" />
+    <item name="is_dragging_tag" type="id" />
 </resources>
