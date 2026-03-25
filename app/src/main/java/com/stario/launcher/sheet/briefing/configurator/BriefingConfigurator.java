@@ -21,7 +21,6 @@ import android.content.ClipData;
 import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
-import android.content.res.Resources;
 import android.util.Log;
 import android.util.Patterns;
 import android.view.LayoutInflater;
@@ -37,6 +36,8 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 
 import com.google.android.material.bottomsheet.BottomSheetBehavior;
+import com.google.gson.Gson;
+import com.google.gson.annotations.SerializedName;
 import com.prof18.rssparser.model.RssChannel;
 import com.stario.launcher.R;
 import com.stario.launcher.Stario;
@@ -55,7 +56,15 @@ import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -67,6 +76,9 @@ public class BriefingConfigurator extends ActionDialog {
     private static final String TAG = "BriefingConfigurator";
     private static final long DEBOUNCE_DELAY = 300;
     private static final int JSOUP_TIMEOUT = 5000;
+    private static final int FEEDLY_TIMEOUT = 8000;
+    private static final int FEEDLY_RESULT_COUNT = 5;
+    private static final String FEEDLY_SEARCH_URL = "https://cloud.feedly.com/v3/search/feeds";
 
     private final BriefingFeedList list;
 
@@ -77,6 +89,7 @@ public class BriefingConfigurator extends ActionDialog {
     private ViewGroup contentView;
     private PulsingTextView limit;
     private LinearLayout preview;
+    private LinearLayout searchResults;
     private TextView title;
     private EditText query;
 
@@ -94,6 +107,7 @@ public class BriefingConfigurator extends ActionDialog {
         preview = contentView.findViewById(R.id.preview);
         title = contentView.findViewById(R.id.title);
         limit = contentView.findViewById(R.id.limit);
+        searchResults = contentView.findViewById(R.id.search_results);
 
         query.addTextChangedListener(new SimpleTextWatcher() {
             @Override
@@ -115,6 +129,12 @@ public class BriefingConfigurator extends ActionDialog {
                     return;
                 }
 
+                if (!Utils.isNetworkAvailable(activity)) {
+                    showStatus(R.string.no_connection, false);
+
+                    return;
+                }
+
                 String validUrl = null;
                 if (isValidUrl(text)) {
                     validUrl = text;
@@ -126,29 +146,26 @@ public class BriefingConfigurator extends ActionDialog {
                     }
                 }
 
-                if (validUrl == null) {
-                    showStatus(R.string.invalid_url, false);
-
-                    return;
+                if (validUrl != null) {
+                    // URL mode: use existing discovery flow
+                    String finalValidUrl = validUrl;
+                    debounceRunnable = () -> {
+                        showStatus(R.string.searching, true);
+                        currentSearchTask = Utils.submitTask(
+                                new FeedDiscoveryTask(activity.getApplicationContext(),
+                                        new String[]{
+                                                finalValidUrl,
+                                                finalValidUrl.replaceAll("/$", "") + ".rss"
+                                        })
+                        );
+                    };
+                } else {
+                    // Natural language mode: use Feedly search
+                    debounceRunnable = () -> {
+                        showStatus(R.string.searching, true);
+                        currentSearchTask = Utils.submitTask(new FeedSearchTask(text));
+                    };
                 }
-
-                if (!Utils.isNetworkAvailable(activity)) {
-                    showStatus(R.string.no_connection, false);
-
-                    return;
-                }
-
-                String finalValidUrl = validUrl;
-                debounceRunnable = () -> {
-                    showStatus(R.string.searching, true);
-                    currentSearchTask = Utils.submitTask(
-                            new FeedDiscoveryTask(activity.getApplicationContext(),
-                                    new String[]{
-                                            finalValidUrl,
-                                            finalValidUrl.replaceAll("/$", "") + ".rss"
-                                    })
-                    );
-                };
 
                 UiUtils.postDelayed(debounceRunnable, DEBOUNCE_DELAY);
             }
@@ -159,18 +176,7 @@ public class BriefingConfigurator extends ActionDialog {
 
             if (validatedFeed != null && validatedFeed.getTitle() != null &&
                     !validatedFeed.getTitle().isEmpty()) {
-                boolean added = list.add(validatedFeed);
-
-                if (added) {
-                    BottomSheetBehavior<?> behavior = getBehavior();
-                    behavior.setDraggable(false);
-                    behavior.setState(BottomSheetBehavior.STATE_HIDDEN);
-
-                    UiUtils.hideKeyboard(contentView);
-                } else {
-                    Toast.makeText(activity,
-                            R.string.already_subscribed, Toast.LENGTH_LONG).show();
-                }
+                addFeedAndDismiss(validatedFeed);
             }
         });
 
@@ -211,15 +217,18 @@ public class BriefingConfigurator extends ActionDialog {
     }
 
     private void showStatus(Integer messageRes, boolean pulsating) {
-        Resources resources = activity.getResources();
-
         if (preview != null) {
             preview.setVisibility(View.GONE);
         }
 
+        if (searchResults != null) {
+            searchResults.setVisibility(View.GONE);
+            searchResults.removeAllViews();
+        }
+
         if (limit != null) {
             if (messageRes != null) {
-                limit.setText(resources.getString(messageRes));
+                limit.setText(activity.getResources().getString(messageRes));
                 limit.setPulsating(pulsating);
                 limit.setVisibility(View.VISIBLE);
             } else {
@@ -236,7 +245,171 @@ public class BriefingConfigurator extends ActionDialog {
         title.setText(feed.getTitle());
         preview.setVisibility(View.VISIBLE);
         limit.setVisibility(View.GONE);
+
+        if (searchResults != null) {
+            searchResults.setVisibility(View.GONE);
+            searchResults.removeAllViews();
+        }
     }
+
+    private void showSearchResults(@NonNull List<Feed> feeds) {
+        validatedFeed = null;
+        preview.setVisibility(View.GONE);
+        limit.setVisibility(View.GONE);
+        searchResults.removeAllViews();
+
+        if (feeds.isEmpty()) {
+            showStatus(R.string.no_feeds_found, false);
+            return;
+        }
+
+        LayoutInflater inflater = LayoutInflater.from(activity);
+
+        for (Feed feed : feeds) {
+            View row = inflater.inflate(R.layout.briefing_search_result, searchResults, false);
+
+            TextView rowTitle = row.findViewById(R.id.result_title);
+            rowTitle.setText(feed.getTitle());
+
+            row.findViewById(R.id.result_add).setOnClickListener(v -> {
+                v.startAnimation(AnimationUtils.loadAnimation(activity, R.anim.bounce_small));
+                addFeedAndDismiss(feed);
+            });
+
+            searchResults.addView(row);
+        }
+
+        searchResults.setVisibility(View.VISIBLE);
+    }
+
+    private void addFeedAndDismiss(@NonNull Feed feed) {
+        boolean added = list.add(feed);
+
+        if (added) {
+            BottomSheetBehavior<?> behavior = getBehavior();
+            behavior.setDraggable(false);
+            behavior.setState(BottomSheetBehavior.STATE_HIDDEN);
+
+            UiUtils.hideKeyboard(contentView);
+        } else {
+            Toast.makeText(activity, R.string.already_subscribed, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ---- Natural language feed search via Feedly ----
+
+    private class FeedSearchTask implements Runnable {
+        private final String queryText;
+
+        private FeedSearchTask(String queryText) {
+            this.queryText = queryText;
+        }
+
+        @Override
+        public void run() {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+
+            try {
+                String encoded = URLEncoder.encode(queryText, StandardCharsets.UTF_8.name());
+                String urlString = FEEDLY_SEARCH_URL + "?query=" + encoded + "&count=" + FEEDLY_RESULT_COUNT;
+
+                URL url = new URL(urlString);
+                HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("GET");
+                connection.setConnectTimeout(FEEDLY_TIMEOUT);
+                connection.setReadTimeout(FEEDLY_TIMEOUT);
+                connection.setRequestProperty("User-Agent", Utils.USER_AGENT);
+
+                int responseCode = connection.getResponseCode();
+
+                if (Thread.currentThread().isInterrupted()) {
+                    connection.disconnect();
+                    return;
+                }
+
+                if (responseCode != HttpURLConnection.HTTP_OK) {
+                    connection.disconnect();
+                    contentView.post(() -> showStatus(R.string.no_feeds_found, false));
+                    return;
+                }
+
+                StringBuilder response = new StringBuilder();
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        response.append(line);
+                    }
+                }
+                connection.disconnect();
+
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+
+                List<Feed> feeds = parseFeedlyResponse(response.toString());
+
+                contentView.post(() -> showSearchResults(feeds));
+
+            } catch (Exception e) {
+                Log.e(TAG, "FeedSearchTask error: " + e.getMessage());
+
+                if (!Thread.currentThread().isInterrupted()) {
+                    contentView.post(() -> showStatus(R.string.no_feeds_found, false));
+                }
+            }
+        }
+
+        private List<Feed> parseFeedlyResponse(String json) {
+            List<Feed> feeds = new ArrayList<>();
+
+            try {
+                FeedlyResponse response = new Gson().fromJson(json, FeedlyResponse.class);
+
+                if (response == null || response.results == null) {
+                    return feeds;
+                }
+
+                for (FeedlyResult result : response.results) {
+                    if (result.feedId == null) continue;
+
+                    // feedId format: "feed/https://rss-url.com/feed"
+                    String rssUrl = result.feedId.startsWith("feed/")
+                            ? result.feedId.substring(5)
+                            : result.feedId;
+
+                    if (rssUrl.isEmpty()) continue;
+
+                    String feedTitle = (result.title != null && !result.title.isEmpty())
+                            ? result.title
+                            : activity.getString(R.string.unknown_feed);
+
+                    feeds.add(new Feed(feedTitle, rssUrl));
+                }
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to parse Feedly response: " + e.getMessage());
+            }
+
+            return feeds;
+        }
+    }
+
+    private static class FeedlyResult {
+        @SerializedName("feedId")
+        String feedId;
+
+        @SerializedName("title")
+        String title;
+    }
+
+    private static class FeedlyResponse {
+        @SerializedName("results")
+        List<FeedlyResult> results;
+    }
+
+    // ---- URL-based feed discovery (unchanged) ----
 
     private class FeedDiscoveryTask implements Runnable {
         private final Stario context;
@@ -257,7 +430,6 @@ public class BriefingConfigurator extends ActionDialog {
                 try {
                     Feed feed = attemptParse(url);
 
-                    // after a network task, check for interruption
                     if (Thread.currentThread().isInterrupted()) {
                         return;
                     }
@@ -300,13 +472,13 @@ public class BriefingConfigurator extends ActionDialog {
 
             try {
                 streamFuture = RSSHelper.futureParse(url);
-                String title = streamFuture.get(10, TimeUnit.SECONDS).getTitle();
+                String feedTitle = streamFuture.get(10, TimeUnit.SECONDS).getTitle();
 
-                if (title == null) {
-                    title = context.getString(R.string.unknown_feed);
+                if (feedTitle == null) {
+                    feedTitle = context.getString(R.string.unknown_feed);
                 }
 
-                return new Feed(title, url);
+                return new Feed(feedTitle, url);
             } catch (InterruptedException | TimeoutException exception) {
                 streamFuture.cancel(true);
 
