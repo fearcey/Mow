@@ -22,6 +22,7 @@ import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.res.Resources;
+import android.net.Uri;
 import android.util.Log;
 import android.util.Patterns;
 import android.view.LayoutInflater;
@@ -50,16 +51,23 @@ import com.stario.launcher.ui.utils.UiUtils;
 import com.stario.launcher.utils.Utils;
 
 import org.jetbrains.annotations.NotNull;
+import org.json.JSONArray;
+import org.json.JSONObject;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Collectors;
 
 import carbon.view.SimpleTextWatcher;
 
@@ -115,6 +123,12 @@ public class BriefingConfigurator extends ActionDialog {
                     return;
                 }
 
+                if (!Utils.isNetworkAvailable(activity)) {
+                    showStatus(R.string.no_connection, false);
+
+                    return;
+                }
+
                 String validUrl = null;
                 if (isValidUrl(text)) {
                     validUrl = text;
@@ -126,29 +140,24 @@ public class BriefingConfigurator extends ActionDialog {
                     }
                 }
 
-                if (validUrl == null) {
-                    showStatus(R.string.invalid_url, false);
-
-                    return;
+                if (validUrl != null) {
+                    String finalValidUrl = validUrl;
+                    debounceRunnable = () -> {
+                        showStatus(R.string.searching, true);
+                        currentSearchTask = Utils.submitTask(
+                                new FeedDiscoveryTask(activity.getApplicationContext(),
+                                        new String[]{
+                                                finalValidUrl,
+                                                finalValidUrl.replaceAll("/$", "") + ".rss"
+                                        })
+                        );
+                    };
+                } else {
+                    debounceRunnable = () -> {
+                        showStatus(R.string.searching, true);
+                        currentSearchTask = Utils.submitTask(new FeedSearchTask(text));
+                    };
                 }
-
-                if (!Utils.isNetworkAvailable(activity)) {
-                    showStatus(R.string.no_connection, false);
-
-                    return;
-                }
-
-                String finalValidUrl = validUrl;
-                debounceRunnable = () -> {
-                    showStatus(R.string.searching, true);
-                    currentSearchTask = Utils.submitTask(
-                            new FeedDiscoveryTask(activity.getApplicationContext(),
-                                    new String[]{
-                                            finalValidUrl,
-                                            finalValidUrl.replaceAll("/$", "") + ".rss"
-                                    })
-                    );
-                };
 
                 UiUtils.postDelayed(debounceRunnable, DEBOUNCE_DELAY);
             }
@@ -337,6 +346,93 @@ public class BriefingConfigurator extends ActionDialog {
             }
 
             return null;
+        }
+    }
+
+    private class FeedSearchTask implements Runnable {
+        private static final String FEEDLY_SEARCH_SCHEME = "https";
+        private static final String FEEDLY_SEARCH_HOST = "cloud.feedly.com";
+        private static final String FEEDLY_SEARCH_PATH = "/v3/search/feeds";
+        private static final String FEED_ID_PREFIX = "feed/";
+        private static final int CONNECT_TIMEOUT_MS = 10000;
+        private static final int READ_TIMEOUT_MS = 10000;
+
+        private final String query;
+
+        private FeedSearchTask(String query) {
+            this.query = query;
+        }
+
+        @Override
+        public void run() {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+
+            String urlString = new Uri.Builder()
+                    .scheme(FEEDLY_SEARCH_SCHEME)
+                    .authority(FEEDLY_SEARCH_HOST)
+                    .path(FEEDLY_SEARCH_PATH)
+                    .appendQueryParameter("count", "5")
+                    .appendQueryParameter("query", query)
+                    .build()
+                    .toString();
+
+            HttpURLConnection connection = null;
+            try {
+                connection = (HttpURLConnection) new URL(urlString).openConnection();
+                connection.setRequestMethod("GET");
+                connection.setRequestProperty("User-Agent", Utils.USER_AGENT);
+                connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+                connection.setReadTimeout(READ_TIMEOUT_MS);
+
+                if (Thread.currentThread().isInterrupted()) {
+                    return;
+                }
+
+                int responseCode = connection.getResponseCode();
+                if (responseCode >= 200 && responseCode < 300) {
+                    String response;
+                    try (BufferedReader reader =
+                                 new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+                        response = reader.lines().collect(Collectors.joining());
+                    }
+
+                    if (Thread.currentThread().isInterrupted()) {
+                        return;
+                    }
+
+                    JSONObject json = new JSONObject(response);
+                    JSONArray results = json.optJSONArray("results");
+
+                    if (results != null && results.length() > 0) {
+                        JSONObject first = results.getJSONObject(0);
+                        String feedId = first.optString("feedId", "");
+                        String feedTitle = first.optString("title",
+                                activity.getString(R.string.unknown_feed));
+
+                        String feedUrl = feedId.startsWith(FEED_ID_PREFIX)
+                                ? feedId.substring(FEED_ID_PREFIX.length())
+                                : feedId;
+
+                        if (!feedUrl.isEmpty()) {
+                            Feed feed = new Feed(feedTitle, feedUrl);
+                            contentView.post(() -> showPreview(feed));
+                            return;
+                        }
+                    }
+                }
+            } catch (Exception exception) {
+                Log.e(TAG, "FeedSearchTask failed", exception);
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+
+            if (!Thread.currentThread().isInterrupted()) {
+                contentView.post(() -> showStatus(R.string.invalid_rss, false));
+            }
         }
     }
 
